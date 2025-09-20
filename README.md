@@ -26,7 +26,7 @@
 ```bash
 # 克隆项目到ComfyUI的custom_nodes目录
 cd ComfyUI/custom_nodes
-git clone https://github.com/your-username/comfyui-yolo-mask-process.git
+git clone https://github.com/gasdyueer/comfyui-yolo-mask-process.git
 
 # 安装Python依赖
 pip install ultralytics torch torchvision scipy pillow numpy
@@ -165,7 +165,7 @@ ComfyUI/
 
 ### 开发环境设置：
 ```bash
-git clone https://github.com/your-username/comfyui-yolo-mask-process.git
+git clone https://github.com/gasdyueer/comfyui-yolo-mask-process.git
 cd comfyui-yolo-mask-process
 pip install -e .
 ```
@@ -184,7 +184,7 @@ pip install -e .
 
 如有问题或建议，请：
 
-1. 查看[Issues](https://github.com/your-username/comfyui-yolo-mask-process/issues)页面
+1. 查看[Issues](https://github.com/gasdyueer/comfyui-yolo-mask-process/issues)页面
 2. 创建新的Issue描述您的问题
 3. 提供详细的错误信息和复现步骤
 
