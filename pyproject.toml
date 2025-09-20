@@ -1,0 +1,19 @@
+[project]
+name = "comfyui-yolo-mask-process"
+version = "0.1.0"
+description = "ComfyUI custom nodes for YOLO detection and mask processing"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ultralytics>=8.0.0",
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "pillow>=8.0.0",
+    "numpy>=1.21.0",
+    "scipy>=1.7.0",
+    "opencv-python>=4.5.0"
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
