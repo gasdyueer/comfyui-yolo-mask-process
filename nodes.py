@@ -86,11 +86,15 @@ def _process_detection_results(results, model):
 
     return output_image_tensor, all_detected_objects_metadata, all_detected_objects_json
 
-def _process_individual_masks(results, H, W, model_path):
+def _process_individual_masks(results, H, W, model_path, force_output_mask, boxes):
     """处理所有独立Mask (N, H, W)"""
     empty_mask_nhw = torch.zeros((1, H, W), dtype=torch.float32, device=torch.device('cpu'))
 
+    all_individual_masks_tensor = empty_mask_nhw
+
+    has_segmentation_masks = False
     if results and results[0].masks is not None and len(results[0].masks.data) > 0:
+        has_segmentation_masks = True
         # masks.data 是 (N, H, W) 格式的张量
         all_individual_masks_tensor = results[0].masks.data.to(torch.float32)
         # 在某些情况下，YOLOv8的mask可能需要resize到原始图像大小
@@ -106,28 +110,44 @@ def _process_individual_masks(results, H, W, model_path):
                 mode='bilinear',
                 align_corners=False
             ).squeeze(1)  # 移除中间的channel维度
-    else:
-        all_individual_masks_tensor = empty_mask_nhw
-        if model_path.endswith(("-seg.pt", "_seg.pt")):  # 检查是否是分割模型
-              print("Yolov8UnifiedNode: Segmentation model used, but no masks detected or available in results.")
-        else:
-              print("Yolov8UnifiedNode: Model does not seem to support segmentation or no masks detected.")
 
-    # 合并所有独立掩码
+    if not has_segmentation_masks:
+        if force_output_mask and boxes is not None and len(boxes) > 0:
+            print("Yolov8UnifiedNode: Forcing output masks using bounding boxes since no segmentation masks available.")
+            N = len(boxes)
+            bbox_masks = torch.zeros((N, H, W), dtype=torch.float32, device=torch.device('cpu'))
+            for i in range(N):
+                x1, y1, x2, y2 = boxes.xyxy[i].cpu().tolist()
+                # Clamp coordinates to image bounds
+                x1, y1, x2, y2 = max(0, int(x1)), max(0, int(y1)), min(W, int(x2)), min(H, int(y2))
+                if x1 < x2 and y1 < y2:
+                    bbox_masks[i, y1:y2, x1:x2] = 1.0
+            all_individual_masks_tensor = bbox_masks
+        else:
+            all_individual_masks_tensor = empty_mask_nhw
+            if model_path.endswith(("-seg.pt", "_seg.pt")):  # 检查是否是分割模型
+                  print("Yolov8UnifiedNode: Segmentation model used, but no masks detected or available in results.")
+            else:
+                  print("Yolov8UnifiedNode: Model does not seem to support segmentation or no masks detected.")
+
+    # 合并所有独立掩码为 (1, H, W)
     if all_individual_masks_tensor.shape[0] > 0:
         all_individual_masks_tensor = torch.any(all_individual_masks_tensor, dim=0).unsqueeze(0)  # (H, W) -> (1, H, W)
 
     return all_individual_masks_tensor
 
 def _process_single_combined_mask(results, H, W, filter_single_mask_by_class_id,
-                                 use_class_name_for_single_mask, class_name_for_single_mask, model):
+                                 use_class_name_for_single_mask, class_name_for_single_mask, model, force_output_mask, boxes):
     """处理单个合并Mask (H, W)"""
     empty_mask_hw = torch.zeros((H, W), dtype=torch.float32, device=torch.device('cpu'))
 
+    single_combined_mask_output = empty_mask_hw
+    has_segmentation_masks = False
+
     if results and results[0].masks is not None and len(results[0].masks.data) > 0:
+        has_segmentation_masks = True
         masks = results[0].masks.data  # (N, H, W)
-        boxes = results[0].boxes       # Boxes object
-        clss = boxes.cls               # 类别ID张量 (N,)
+        clss = results[0].boxes.cls if results[0].boxes is not None else torch.tensor([])  # 类别ID张量 (N,)
 
         target_lookup_id = None
         if use_class_name_for_single_mask:
@@ -170,9 +190,50 @@ def _process_single_combined_mask(results, H, W, filter_single_mask_by_class_id,
         else:
             single_combined_mask_output = empty_mask_hw
             print("Yolov8UnifiedNode: Invalid filter criteria for single combined mask. Returning empty mask.")
-    else:
-        single_combined_mask_output = empty_mask_hw
-        print("Yolov8UnifiedNode: No masks available for single combined mask generation.")
+
+    if not has_segmentation_masks:
+        if force_output_mask and boxes is not None and len(boxes) > 0:
+            clss = boxes.cls  # 类别ID张量 (N,)
+
+            target_lookup_id = None
+            if use_class_name_for_single_mask:
+                name_to_id = {v.lower(): k for k, v in model.names.items()}
+                input_class_name_lower = class_name_for_single_mask.lower().strip()
+
+                if input_class_name_lower in name_to_id:
+                    target_lookup_id = name_to_id[input_class_name_lower]
+                    print(f"Yolov8UnifiedNode: Filtering single combined mask by class name '{class_name_for_single_mask}' (mapped to ID: {target_lookup_id}).")
+                else:
+                    print(f"Yolov8UnifiedNode: Warning: Class name '{class_name_for_single_mask}' not found in model's recognized names. Single combined mask will be empty.")
+            else:
+                target_lookup_id = filter_single_mask_by_class_id
+                print(f"Yolov8UnifiedNode: Filtering single combined mask by class ID {filter_single_mask_by_class_id}.")
+
+            if target_lookup_id is not None:
+                target_indices = torch.where(clss == target_lookup_id)[0]
+
+                if len(target_indices) > 0:
+                    print("Yolov8UnifiedNode: Forcing single combined mask using bounding boxes for target class since no segmentation masks available.")
+                    target_bbox_masks = []
+                    for idx in target_indices:
+                        x1, y1, x2, y2 = boxes.xyxy[idx].cpu().tolist()
+                        # Clamp coordinates to image bounds
+                        x1, y1, x2, y2 = max(0, int(x1)), max(0, int(y1)), min(W, int(x2)), min(H, int(y2))
+                        if x1 < x2 and y1 < y2:
+                            bbox_mask = torch.zeros((H, W), dtype=torch.float32, device=torch.device('cpu'))
+                            bbox_mask[y1:y2, x1:x2] = 1.0
+                            target_bbox_masks.append(bbox_mask)
+                    if target_bbox_masks:
+                        single_combined_mask_output = torch.any(torch.stack(target_bbox_masks), dim=0)
+                else:
+                    single_combined_mask_output = empty_mask_hw
+                    print(f"Yolov8UnifiedNode: No objects of target filter criteria detected for single combined mask.")
+            else:
+                single_combined_mask_output = empty_mask_hw
+                print("Yolov8UnifiedNode: Invalid filter criteria for single combined mask. Returning empty mask.")
+        else:
+            single_combined_mask_output = empty_mask_hw
+            print("Yolov8UnifiedNode: No masks available for single combined mask generation.")
 
     return single_combined_mask_output
 
@@ -189,9 +250,9 @@ def _apply_smoothing(masks_tensor, single_mask, smooth_masks, smooth_sigma):
 
     return masks_tensor, single_mask
 
-# 设置YOLO模型的路径
+# 设置YOLOv8模型的路径
 # 确保这个路径设置是正确的，ComfyUI通常会自动管理这一部分
-# 或者用户需要手动将YOLO模型（例如 yolov8n.pt, yolov8n-seg.pt）放入 models/YOLO_MODEL 文件夹
+# 或者用户需要手动将YOLOv8模型（例如 yolov8n.pt, yolov8n-seg.pt）放入 models/yolov8 文件夹
 folder_paths.folder_names_and_paths["YOLO_MODEL"] = ([os.path.join(folder_paths.models_dir, "YOLO_MODEL")], folder_paths.supported_pt_extensions)
 
 class YoloDetectionAndSegmentation:
@@ -212,6 +273,8 @@ class YoloDetectionAndSegmentation:
                 # 平滑掩码选项
                 "smooth_masks": ("BOOLEAN", {"default": False, "label_on": "Enable Mask Smoothing", "label_off": "Disable Mask Smoothing"}),
                 "smooth_sigma": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+                # 强制输出掩码选项
+                "force_output_mask": ("BOOLEAN", {"default": True, "label_on": "Force Output Mask with BBox", "label_off": "Use Only Segmentation Masks"}),
             },
         }
 
@@ -223,7 +286,7 @@ class YoloDetectionAndSegmentation:
 
     def process_yolov8(self, image, model_name, confidence_threshold,
                          filter_single_mask_by_class_id, use_class_name_for_single_mask,
-                         class_name_for_single_mask, smooth_masks, smooth_sigma):
+                         class_name_for_single_mask, smooth_masks, smooth_sigma, force_output_mask):
 
         # 步骤1: 图像预处理
         pil_image, H, W = _prepare_image_for_inference(image)
@@ -238,13 +301,18 @@ class YoloDetectionAndSegmentation:
         # 步骤4: 处理检测结果
         output_image_tensor, all_detected_objects_metadata, all_detected_objects_json = _process_detection_results(results, model)
 
+        # 获取boxes用于force mask
+        boxes = None
+        if results and results[0].boxes is not None:
+            boxes = results[0].boxes
+
         # 步骤5: 处理独立mask
-        all_individual_masks_tensor = _process_individual_masks(results, H, W, model_path)
+        all_individual_masks_tensor = _process_individual_masks(results, H, W, model_path, force_output_mask, boxes)
 
         # 步骤6: 处理单个合并mask
         single_combined_mask_output = _process_single_combined_mask(
             results, H, W, filter_single_mask_by_class_id,
-            use_class_name_for_single_mask, class_name_for_single_mask, model
+            use_class_name_for_single_mask, class_name_for_single_mask, model, force_output_mask, boxes
         )
 
         # 步骤7: 应用平滑
